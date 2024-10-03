@@ -2,9 +2,19 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken')
+const SSLCommerzPayment = require('sslcommerz-lts')
 require('dotenv').config()
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
 const port = process.env.PORT || 5000;
+const formData = require('form-data');
+const Mailgun = require('mailgun.js');
+const mailgun = new Mailgun(formData);
+
+const mg = mailgun.client({
+  username: 'api',
+  key: process.env.MAILGUN_API_KEY
+});
+
 
 
 
@@ -36,6 +46,7 @@ async function run() {
     const reviewsCollection = client.db("restaurantDb").collection("reviews");
     const cartCollection = client.db("restaurantDb").collection("carts");
     const paymentCollection = client.db("restaurantDb").collection("payments");
+    const reservationsCollection = client.db("restaurantDb").collection("reservations");
 
 
     // jwt related api
@@ -96,6 +107,7 @@ async function run() {
       res.send({ admin });
     })
 
+
     app.post('/users', async (req, res) => {
       const user = req.body;
 
@@ -121,6 +133,7 @@ async function run() {
       const result = await userCollection.updateOne(filter, updatedDoc);
       res.send(result);
     })
+
 
     app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
@@ -177,6 +190,38 @@ async function run() {
       res.send(result);
     })
 
+
+    app.post('/reviews', verifyToken, async (req, res) => {
+      const item = req.body;
+      const result = await reviewsCollection.insertOne(item);
+      res.send(result);
+    });
+
+    // Reservation items
+
+
+    app.post('/reservations', async (req, res) => {
+      const item = req.body;
+      const result = await reservationsCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.get('/reservations', verifyToken, async (req, res) => {
+      const email = req.query.email;
+      const query = { email: email };
+      const result = await reservationsCollection.find(query).toArray();
+      res.send(result);
+    })
+
+    app.delete('/reservations/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await reservationsCollection.deleteOne(query);
+      res.send(result);
+    })
+
+
+
     // cart collection
 
     app.get('/carts', async (req, res) => {
@@ -230,6 +275,7 @@ async function run() {
       const payment = req.body;
       const paymentResult = await paymentCollection.insertOne(payment);
 
+      //  carefully delete each item from the cart
       console.log('payment info', payment);
       const query = {
         _id: {
@@ -239,9 +285,63 @@ async function run() {
 
       const deleteResult = await cartCollection.deleteMany(query);
 
-      res.send({ paymentResult, deleteResult });
+      // send user email about your payment confirmation
+      mg.messages
+        .create(process.env.MAIL_SENDING_DOMAIN, {
+          from: "Mailgun Sandbox  <postmaster@sandbox327c4c33569b4a9e8b8db7bc5c6be170.mailgun.org>",
+          to: ["istiaqueahmedsajeeb2017@gmail.com"],
+          subject: "Restaurent Order Confirmation",
+          text: "Testing some Mailgun awesomness!",
+          html: `
+          <div>
+            <h1>Thank your for your order.</h1>
+            <h2>Your Transaction Id: <strong>${payment.transaction}</strong></h2>
+            <p>We would like to get your feedback.</p>
+        </div>
+        `
+        })
+        .then(msg => console.log(msg)) // logs response data
+        .catch(err => console.error(err)); // logs any error
 
+      res.send({ paymentResult, deleteResult });
     })
+
+
+
+
+
+    // stats or analytics
+    app.get('/admin-stats', verifyToken, verifyAdmin, async (req, res) => {
+
+      const users = await userCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      const result = await paymentCollection.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: {
+              $sum: '$price'
+            }
+          }
+        }
+      ]).toArray();
+
+
+
+      const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+      res.send({
+        users,
+        menuItems,
+        orders,
+        revenue
+      })
+    })
+
+
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
